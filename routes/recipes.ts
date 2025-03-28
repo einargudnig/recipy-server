@@ -1,12 +1,43 @@
 import { Hono } from "hono";
 import { db } from "../db";
-import type { Recipe } from "../types";
+import { recipes } from "../schema";
+import { eq, like, sql, and } from "drizzle-orm";
 
 const app = new Hono();
 
 // GET all recipes
+
+// Implement pagination for the main recipes endpoint
+app.get("/", async (c) => {
+  const limit = parseInt(c.req.query("limit") || "10");
+  const offset = parseInt(c.req.query("offset") || "0");
+
+  try {
+    // Get total count
+    const countResult = await db.select({ count: sql`count(*)` }).from(recipes);
+    const total = Number(countResult[0]?.count);
+
+    // Get paginated recipes
+    const recipeList = await db
+      .select()
+      .from(recipes)
+      .limit(limit)
+      .offset(offset);
+
+    return c.json({
+      recipes: recipeList,
+      total,
+      limit,
+      offset,
+    });
+  } catch (error) {
+    console.error("Error fetching recipes:", error);
+    return c.json({ error: "Failed to fetch recipes" }, 500);
+  }
+});
+
 // This needs to come BEFORE the /recipes/:id route to avoid conflicts
-app.get("/search", (c) => {
+app.get("/search", async (c) => {
   const query = c.req.query("q")?.toLowerCase();
   const categoryId = c.req.query("category");
 
@@ -17,51 +48,45 @@ app.get("/search", (c) => {
     );
   }
 
-  let matchingRecipes = Array.from(db.recipes.values());
+  try {
+    let conditions = [];
 
-  // Filter by name if query is provided
-  if (query) {
-    matchingRecipes = matchingRecipes.filter((recipe) =>
-      recipe.name.toLowerCase().includes(query),
-    );
+    if (query) {
+      conditions.push(like(recipes.name, `%${query}%`));
+    }
+
+    if (categoryId) {
+      conditions.push(eq(recipes.categoryId, categoryId));
+    }
+
+    const searchResults = await db
+      .select()
+      .from(recipes)
+      .where(and(...conditions));
+
+    return c.json(searchResults);
+  } catch (error) {
+    console.error("Error searching recipes:", error);
+    return c.json({ error: "Failed to search recipes" }, 500);
   }
-
-  // Filter by category if categoryId is provided
-  if (categoryId) {
-    matchingRecipes = matchingRecipes.filter(
-      (recipe) => recipe.categoryId === categoryId,
-    );
-  }
-
-  return c.json(matchingRecipes);
-});
-
-// Implement pagination for the main recipes endpoint
-app.get("/", (c) => {
-  const limit = parseInt(c.req.query("limit") || "10");
-  const offset = parseInt(c.req.query("offset") || "0");
-
-  const allRecipes = Array.from(db.recipes.values());
-  const paginatedRecipes = allRecipes.slice(offset, offset + limit);
-
-  return c.json({
-    recipes: paginatedRecipes,
-    total: allRecipes.length,
-    limit,
-    offset,
-  });
 });
 
 // GET a specific recipe
-app.get("/:id", (c) => {
+app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const recipe = db.recipes.get(id);
 
-  if (!recipe) {
-    return c.json({ error: "Recipe not found" }, 404);
+  try {
+    const [recipe] = await db.select().from(recipes).where(eq(recipes.id, id));
+
+    if (!recipe) {
+      return c.json({ error: "Recipe not found" }, 404);
+    }
+
+    return c.json(recipe);
+  } catch (error) {
+    console.error("Error fetching recipe:", error);
+    return c.json({ error: "Failed to fetch recipe" }, 500);
   }
-
-  return c.json(recipe);
 });
 
 // POST a new recipe
@@ -69,23 +94,73 @@ app.post("/", async (c) => {
   try {
     const body = await c.req.json();
 
-    // Basic Validation
+    // Basic validation
     if (!body.name || !body.ingredients || !body.instructions) {
       return c.json({ error: "Missing required fields" }, 400);
     }
 
-    const recipe = db.addRecipe(body as Recipe);
+    const [recipe] = await db
+      .insert(recipes)
+      .values({
+        name: body.name,
+        description: body.description,
+        ingredients: body.ingredients,
+        instructions: body.instructions,
+        prepTime: body.prepTime,
+        cookTime: body.cookTime,
+        servings: body.servings,
+        categoryId: body.categoryId,
+      })
+      .returning();
+
     return c.json(recipe, 201);
   } catch (error) {
-    return c.json({ error: "Invalid request body" }, 400);
+    console.error("Error creating recipe:", error);
+    return c.json({ error: "Failed to create recipe" }, 500);
+  }
+});
+
+// POST a new recipe
+app.post("/recipes", async (c) => {
+  try {
+    const body = await c.req.json();
+
+    // Basic validation
+    if (!body.name || !body.ingredients || !body.instructions) {
+      return c.json({ error: "Missing required fields" }, 400);
+    }
+
+    const [recipe] = await db
+      .insert(recipes)
+      .values({
+        name: body.name,
+        description: body.description || "",
+        ingredients: body.ingredients,
+        instructions: body.instructions,
+        prepTime: body.prepTime,
+        cookTime: body.cookTime,
+        servings: body.servings,
+        categoryId: body.categoryId,
+      })
+      .returning();
+
+    return c.json(recipe, 201);
+  } catch (error) {
+    console.error("Error creating recipe:", error);
+    return c.json({ error: "Failed to create recipe" }, 500);
   }
 });
 
 // PUT to completely replace a recipe
 app.put("/:id", async (c) => {
+  const id = c.req.param("id");
+
   try {
-    const id = c.req.param("id");
-    const existingRecipe = db.recipes.get(id);
+    // Check if recipe exists
+    const [existingRecipe] = await db
+      .select()
+      .from(recipes)
+      .where(eq(recipes.id, id));
 
     if (!existingRecipe) {
       return c.json({ error: "Recipe not found" }, 404);
@@ -98,28 +173,40 @@ app.put("/:id", async (c) => {
       return c.json({ error: "Missing required fields" }, 400);
     }
 
-    // Create updated recipe (keeping original id and createdAt)
-    const updatedRecipe: Recipe = {
-      ...body,
-      id: existingRecipe.id,
-      createdAt: existingRecipe.createdAt,
-      updatedAt: new Date(),
-    };
-
-    // Save to database
-    db.recipes.set(id, updatedRecipe);
+    // Update the recipe
+    const [updatedRecipe] = await db
+      .update(recipes)
+      .set({
+        name: body.name,
+        description: body.description || "",
+        ingredients: body.ingredients,
+        instructions: body.instructions,
+        prepTime: body.prepTime,
+        cookTime: body.cookTime,
+        servings: body.servings,
+        categoryId: body.categoryId,
+        updatedAt: new Date(),
+      })
+      .where(eq(recipes.id, id))
+      .returning();
 
     return c.json(updatedRecipe);
   } catch (error) {
-    return c.json({ error: "Invalid request body" }, 400);
+    console.error("Error updating recipe:", error);
+    return c.json({ error: "Failed to update recipe" }, 500);
   }
 });
 
 // PATCH to update specific fields of a recipe
 app.patch("/:id", async (c) => {
+  const id = c.req.param("id");
+
   try {
-    const id = c.req.param("id");
-    const existingRecipe = db.recipes.get(id);
+    // Check if recipe exists
+    const [existingRecipe] = await db
+      .select()
+      .from(recipes)
+      .where(eq(recipes.id, id));
 
     if (!existingRecipe) {
       return c.json({ error: "Recipe not found" }, 404);
@@ -127,34 +214,59 @@ app.patch("/:id", async (c) => {
 
     const updates = await c.req.json();
 
-    // Create updated recipe by merging existing recipe with updates
-    const updatedRecipe: Recipe = {
-      ...existingRecipe,
-      ...updates,
-      id: existingRecipe.id, // Ensure ID doesn't change
-      createdAt: existingRecipe.createdAt, // Preserve creation date
-      updatedAt: new Date(), // Update the modification date
-    };
+    // Prepare update data (only include fields that are provided)
+    const updateData: any = { updatedAt: new Date() };
 
-    // Save to database
-    db.recipes.set(id, updatedRecipe);
+    if (updates.name !== undefined) updateData.name = updates.name;
+    if (updates.description !== undefined)
+      updateData.description = updates.description;
+    if (updates.ingredients !== undefined)
+      updateData.ingredients = updates.ingredients;
+    if (updates.instructions !== undefined)
+      updateData.instructions = updates.instructions;
+    if (updates.prepTime !== undefined) updateData.prepTime = updates.prepTime;
+    if (updates.cookTime !== undefined) updateData.cookTime = updates.cookTime;
+    if (updates.servings !== undefined) updateData.servings = updates.servings;
+    if (updates.categoryId !== undefined)
+      updateData.categoryId = updates.categoryId;
+
+    // Update the recipe
+    const [updatedRecipe] = await db
+      .update(recipes)
+      .set(updateData)
+      .where(eq(recipes.id, id))
+      .returning();
 
     return c.json(updatedRecipe);
   } catch (error) {
-    return c.json({ error: "Invalid request body" }, 400);
+    console.error("Error updating recipe:", error);
+    return c.json({ error: "Failed to update recipe" }, 500);
   }
 });
 
 // DELETE a recipe
-app.delete("/:id", (c) => {
+app.delete("/:id", async (c) => {
   const id = c.req.param("id");
 
-  if (!db.recipes.has(id)) {
-    return c.json({ error: "Recipe not found" }, 404);
-  }
+  try {
+    // Check if recipe exists
+    const [existingRecipe] = await db
+      .select()
+      .from(recipes)
+      .where(eq(recipes.id, id));
 
-  db.recipes.delete(id);
-  return c.json(204);
+    if (!existingRecipe) {
+      return c.json({ error: "Recipe not found" }, 404);
+    }
+
+    // Delete the recipe
+    await db.delete(recipes).where(eq(recipes.id, id));
+
+    return c.json(204);
+  } catch (error) {
+    console.error("Error deleting recipe:", error);
+    return c.json({ error: "Failed to delete recipe" }, 500);
+  }
 });
 
 export default app;
