@@ -1,6 +1,8 @@
 import { Hono } from "hono";
+import { zValidator } from "@hono/zod-validator";
 import { db } from "../db";
 import { recipes } from "../schema";
+import { recipeSchema, recipeUpdateSchema } from "../validation";
 import { eq, like, sql, and } from "drizzle-orm";
 
 const app = new Hono();
@@ -90,7 +92,7 @@ app.get("/:id", async (c) => {
 });
 
 // POST a new recipe
-app.post("/", async (c) => {
+app.post("/", zValidator("json", recipeSchema), async (c) => {
   try {
     const body = await c.req.json();
 
@@ -167,7 +169,7 @@ app.put("/:id", async (c) => {
 });
 
 // PATCH to update specific fields of a recipe
-app.patch("/:id", async (c) => {
+app.patch("/:id", zValidator("json", recipeUpdateSchema), async (c) => {
   const id = c.req.param("id");
 
   try {

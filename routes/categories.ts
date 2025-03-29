@@ -1,5 +1,7 @@
 import { Hono } from "hono";
+import { zValidator } from "@hono/zod-validator";
 import { db } from "../db";
+import { categorySchema } from "../validation";
 import { categories, recipes } from "../schema";
 import { eq, sql } from "drizzle-orm";
 
@@ -38,7 +40,7 @@ category.get("/categories/:id", async (c) => {
 });
 
 // POST a new category
-category.post("/", async (c) => {
+category.post("/", zValidator("json", categorySchema), async (c) => {
   try {
     const body = await c.req.json();
 

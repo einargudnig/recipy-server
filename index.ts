@@ -1,11 +1,12 @@
 import { Hono } from "hono";
 import recipe from "./routes/recipes";
 import category from "./routes/categories";
-import { logger } from "hono/logger";
+import { logger, errorHandler } from "./middleware";
 
 const app = new Hono();
 
-app.use("*", logger());
+app.use("*", logger);
+app.use("*", errorHandler);
 
 // Root route
 app.get("/", (c) => {
