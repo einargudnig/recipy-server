@@ -120,37 +120,6 @@ app.post("/", async (c) => {
   }
 });
 
-// POST a new recipe
-app.post("/recipes", async (c) => {
-  try {
-    const body = await c.req.json();
-
-    // Basic validation
-    if (!body.name || !body.ingredients || !body.instructions) {
-      return c.json({ error: "Missing required fields" }, 400);
-    }
-
-    const [recipe] = await db
-      .insert(recipes)
-      .values({
-        name: body.name,
-        description: body.description || "",
-        ingredients: body.ingredients,
-        instructions: body.instructions,
-        prepTime: body.prepTime,
-        cookTime: body.cookTime,
-        servings: body.servings,
-        categoryId: body.categoryId,
-      })
-      .returning();
-
-    return c.json(recipe, 201);
-  } catch (error) {
-    console.error("Error creating recipe:", error);
-    return c.json({ error: "Failed to create recipe" }, 500);
-  }
-});
-
 // PUT to completely replace a recipe
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
