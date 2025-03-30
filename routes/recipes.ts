@@ -1,16 +1,16 @@
-import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
+import { and, asc, desc, eq, gte, isNull, like, or, sql } from "drizzle-orm";
+import { Hono } from "hono";
 import { db } from "../db";
-import { recipes, ratings, categories } from "../schema";
-import { recipeSchema, recipeUpdateSchema } from "../validation";
-import { eq, like, sql, and, desc, asc, or, gte, isNull } from "drizzle-orm";
+import { categories, ratings, recipes } from "../schema";
+import { recipeSchema, recipeUpdateSchema, ratingSchema } from "../validation";
 
 const app = new Hono();
 
 // GET all recipes
 
 // Implement pagination for the main recipes endpoint
-app.get("/recipes", async (c) => {
+app.get("/", async (c) => {
   const limit = parseInt(c.req.query("limit") || "10");
   const offset = parseInt(c.req.query("offset") || "0");
   const sortBy = c.req.query("sortBy") || "createdAt";
@@ -23,9 +23,6 @@ app.get("/recipes", async (c) => {
       .from(recipes);
     const total = countResult[0]?.count;
 
-    let query = db.select().from(recipes);
-
-    // Apply sorting
     if (sortBy === "rating") {
       // Join with a subquery that calculates average ratings
       const recipeRatings = db
@@ -37,9 +34,20 @@ app.get("/recipes", async (c) => {
         .groupBy(ratings.recipeId)
         .as("recipe_ratings");
 
-      query = db
+      // For rating-based sorting, we'll use a different approach
+      const results = await db
         .select({
-          recipe: recipes,
+          id: recipes.id,
+          name: recipes.name,
+          description: recipes.description,
+          ingredients: recipes.ingredients,
+          instructions: recipes.instructions,
+          prepTime: recipes.prepTime,
+          cookTime: recipes.cookTime,
+          servings: recipes.servings,
+          categoryId: recipes.categoryId,
+          createdAt: recipes.createdAt,
+          updatedAt: recipes.updatedAt,
           avgRating: recipeRatings.avgRating,
         })
         .from(recipes)
@@ -51,6 +59,21 @@ app.get("/recipes", async (c) => {
         )
         .limit(limit)
         .offset(offset);
+
+      // Format the response with ratings
+      const formattedRecipes = results.map((item) => ({
+        ...item,
+        averageRating: item.avgRating || 0,
+      }));
+
+      return c.json({
+        recipes: formattedRecipes,
+        total,
+        limit,
+        offset,
+        sortBy,
+        order,
+      });
     } else {
       // Standard sorting by recipe fields
       const sortColumn =
@@ -62,33 +85,22 @@ app.get("/recipes", async (c) => {
               ? recipes.cookTime
               : recipes.createdAt;
 
-      query = query
+      const recipeList = await db
+        .select()
+        .from(recipes)
         .orderBy(order === "desc" ? desc(sortColumn) : asc(sortColumn))
         .limit(limit)
         .offset(offset);
+
+      return c.json({
+        recipes: recipeList,
+        total,
+        limit,
+        offset,
+        sortBy,
+        order,
+      });
     }
-
-    const recipeList = await query;
-
-    // Format the response
-    let formattedRecipes;
-    if (sortBy === "rating") {
-      formattedRecipes = recipeList.map((item) => ({
-        ...item.recipe,
-        averageRating: item.avgRating || 0,
-      }));
-    } else {
-      formattedRecipes = recipeList;
-    }
-
-    return c.json({
-      recipes: formattedRecipes,
-      total,
-      limit,
-      offset,
-      sortBy,
-      order,
-    });
   } catch (error) {
     console.error("Error fetching recipes:", error);
     return c.json({ error: "Failed to fetch recipes" }, 500);
@@ -96,7 +108,7 @@ app.get("/recipes", async (c) => {
 });
 
 // This needs to come BEFORE the /recipes/:id route to avoid conflicts
-app.get("/recipes/search", async (c) => {
+app.get("/search", async (c) => {
   const query = c.req.query("q")?.toLowerCase();
   const categoryId = c.req.query("category");
   const minRating = parseInt(c.req.query("minRating") || "0");
@@ -184,7 +196,7 @@ app.get("/recipes/search", async (c) => {
 });
 
 // GET a specific recipe
-app.get("/recipes/:id", async (c) => {
+app.get("/:id", async (c) => {
   const id = c.req.param("id");
 
   try {
@@ -225,6 +237,67 @@ app.get("/recipes/:id", async (c) => {
   }
 });
 
+// Get ratings for a specific recipe
+app.get("/recipes/:id/ratings", async (c) => {
+  const recipeId = c.req.param("id");
+
+  try {
+    // Check if recipe exists
+    const [recipe] = await db
+      .select()
+      .from(recipes)
+      .where(eq(recipes.id, recipeId));
+
+    if (!recipe) {
+      return c.json({ error: "Recipe not found" }, 404);
+    }
+
+    const recipeRatings = await db
+      .select()
+      .from(ratings)
+      .where(eq(ratings.recipeId, recipeId));
+
+    return c.json(recipeRatings);
+  } catch (error) {
+    console.error("Error fetching ratings:", error);
+    return c.json({ error: "Failed to fetch ratings" }, 500);
+  }
+});
+
+// GET avg rating
+app.get("/recipes/:id/average-rating", async (c) => {
+  const recipeId = c.req.param("id");
+
+  try {
+    // Check if recipe exists
+    const [recipe] = await db
+      .select()
+      .from(recipes)
+      .where(eq(recipes.id, recipeId));
+
+    if (!recipe) {
+      return c.json({ error: "Recipe not found" }, 404);
+    }
+
+    const [result] = await db
+      .select({
+        average: sql`ROUND(AVG(rating)::numeric, 1)`,
+        count: sql`COUNT(*)::int`,
+      })
+      .from(ratings)
+      .where(eq(ratings.recipeId, recipeId));
+
+    return c.json({
+      recipeId,
+      averageRating: result?.average || 0,
+      ratingCount: result?.count,
+    });
+  } catch (error) {
+    console.error("Error calculating average rating:", error);
+    return c.json({ error: "Failed to calculate average rating" }, 500);
+  }
+});
+
 // POST a new recipe
 app.post("/", zValidator("json", recipeSchema), async (c) => {
   try {
@@ -253,6 +326,40 @@ app.post("/", zValidator("json", recipeSchema), async (c) => {
   } catch (error) {
     console.error("Error creating recipe:", error);
     return c.json({ error: "Failed to create recipe" }, 500);
+  }
+});
+
+// POST a rating for recipe
+app.post(":id/ratings", zValidator("json", ratingSchema), async (c) => {
+  const recipeId = c.req.param("id");
+
+  try {
+    // Check if recipe exists
+    const [recipe] = await db
+      .select()
+      .from(recipes)
+      .where(eq(recipes.id, recipeId));
+
+    if (!recipe) {
+      return c.json({ error: "Recipe not found" }, 404);
+    }
+
+    // The validator middleware has already validated the body
+    const body = c.req.valid("json");
+
+    const [rating] = await db
+      .insert(ratings)
+      .values({
+        recipeId,
+        rating: body.rating,
+        comment: body.comment,
+      })
+      .returning();
+
+    return c.json(rating, 201);
+  } catch (error) {
+    console.error("Error creating rating:", error);
+    return c.json({ error: "Failed to create rating" }, 500);
   }
 });
 

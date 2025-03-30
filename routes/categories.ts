@@ -1,9 +1,9 @@
-import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
-import { db } from "../db";
-import { categorySchema } from "../validation";
-import { categories, recipes } from "../schema";
 import { eq, sql } from "drizzle-orm";
+import { Hono } from "hono";
+import { db } from "../db";
+import { categories, recipes } from "../schema";
+import { categorySchema } from "../validation";
 
 const category = new Hono();
 
