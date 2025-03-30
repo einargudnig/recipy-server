@@ -24,3 +24,8 @@ export const recipeSchema = z.object({
 
 // Partial schema for PATCH updates
 export const recipeUpdateSchema = recipeSchema.partial();
+
+export const ratingSchema = z.object({
+  rating: z.number().int().min(1, "Rating must be between 1 and 5").max(5),
+  comment: z.string().optional(),
+});
