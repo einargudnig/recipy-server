@@ -1,36 +1,93 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { db } from "../db";
-import { recipes } from "../schema";
+import { recipes, ratings, categories } from "../schema";
 import { recipeSchema, recipeUpdateSchema } from "../validation";
-import { eq, like, sql, and } from "drizzle-orm";
+import { eq, like, sql, and, desc, asc, or, gte, isNull } from "drizzle-orm";
 
 const app = new Hono();
 
 // GET all recipes
 
 // Implement pagination for the main recipes endpoint
-app.get("/", async (c) => {
+app.get("/recipes", async (c) => {
   const limit = parseInt(c.req.query("limit") || "10");
   const offset = parseInt(c.req.query("offset") || "0");
+  const sortBy = c.req.query("sortBy") || "createdAt";
+  const order = c.req.query("order") || "desc";
 
   try {
     // Get total count
-    const countResult = await db.select({ count: sql`count(*)` }).from(recipes);
-    const total = Number(countResult[0]?.count);
+    const countResult = await db
+      .select({ count: sql`count(*)::int` })
+      .from(recipes);
+    const total = countResult[0]?.count;
 
-    // Get paginated recipes
-    const recipeList = await db
-      .select()
-      .from(recipes)
-      .limit(limit)
-      .offset(offset);
+    let query = db.select().from(recipes);
+
+    // Apply sorting
+    if (sortBy === "rating") {
+      // Join with a subquery that calculates average ratings
+      const recipeRatings = db
+        .select({
+          recipeId: ratings.recipeId,
+          avgRating: sql`ROUND(AVG(rating)::numeric, 1)`,
+        })
+        .from(ratings)
+        .groupBy(ratings.recipeId)
+        .as("recipe_ratings");
+
+      query = db
+        .select({
+          recipe: recipes,
+          avgRating: recipeRatings.avgRating,
+        })
+        .from(recipes)
+        .leftJoin(recipeRatings, eq(recipes.id, recipeRatings.recipeId))
+        .orderBy(
+          order === "desc"
+            ? desc(recipeRatings.avgRating)
+            : asc(recipeRatings.avgRating),
+        )
+        .limit(limit)
+        .offset(offset);
+    } else {
+      // Standard sorting by recipe fields
+      const sortColumn =
+        sortBy === "name"
+          ? recipes.name
+          : sortBy === "prepTime"
+            ? recipes.prepTime
+            : sortBy === "cookTime"
+              ? recipes.cookTime
+              : recipes.createdAt;
+
+      query = query
+        .orderBy(order === "desc" ? desc(sortColumn) : asc(sortColumn))
+        .limit(limit)
+        .offset(offset);
+    }
+
+    const recipeList = await query;
+
+    // Format the response
+    let formattedRecipes;
+    if (sortBy === "rating") {
+      formattedRecipes = recipeList.map((item) => ({
+        ...item.recipe,
+        averageRating: item.avgRating || 0,
+      }));
+    } else {
+      formattedRecipes = recipeList;
+    }
 
     return c.json({
-      recipes: recipeList,
+      recipes: formattedRecipes,
       total,
       limit,
       offset,
+      sortBy,
+      order,
     });
   } catch (error) {
     console.error("Error fetching recipes:", error);
@@ -39,34 +96,87 @@ app.get("/", async (c) => {
 });
 
 // This needs to come BEFORE the /recipes/:id route to avoid conflicts
-app.get("/search", async (c) => {
+app.get("/recipes/search", async (c) => {
   const query = c.req.query("q")?.toLowerCase();
   const categoryId = c.req.query("category");
+  const minRating = parseInt(c.req.query("minRating") || "0");
 
-  if (!query && !categoryId) {
+  if (!query && !categoryId && !minRating) {
     return c.json(
-      { error: "Search query or category filter is required" },
+      { error: "Search query, category filter, or minimum rating is required" },
       400,
     );
   }
 
   try {
-    let conditions = [];
+    // If filtering by rating, we need to join with ratings
+    if (minRating > 0) {
+      // Create a subquery for average ratings
+      const recipeRatings = db
+        .select({
+          recipeId: ratings.recipeId,
+          avgRating: sql`ROUND(AVG(rating)::numeric, 1)`,
+        })
+        .from(ratings)
+        .groupBy(ratings.recipeId)
+        .as("recipe_ratings");
 
-    if (query) {
-      conditions.push(like(recipes.name, `%${query}%`));
+      // Build the query with conditions
+      let conditions = [];
+
+      if (query) {
+        conditions.push(like(recipes.name, `%${query}%`));
+      }
+
+      if (categoryId) {
+        conditions.push(eq(recipes.categoryId, categoryId));
+      }
+
+      const searchResults = await db
+        .select({
+          recipe: recipes,
+          avgRating: recipeRatings.avgRating,
+        })
+        .from(recipes)
+        .leftJoin(recipeRatings, eq(recipes.id, recipeRatings.recipeId))
+        .where(
+          and(
+            ...conditions,
+            // Only include recipes with average rating >= minRating
+            // or NULL ratings (which means no ratings yet)
+            or(
+              gte(recipeRatings.avgRating, minRating),
+              isNull(recipeRatings.avgRating),
+            ),
+          ),
+        );
+
+      // Format the results
+      const formattedResults = searchResults.map((item) => ({
+        ...item.recipe,
+        averageRating: item.avgRating || 0,
+      }));
+
+      return c.json(formattedResults);
+    } else {
+      // Standard search without rating filter
+      let conditions = [];
+
+      if (query) {
+        conditions.push(like(recipes.name, `%${query}%`));
+      }
+
+      if (categoryId) {
+        conditions.push(eq(recipes.categoryId, categoryId));
+      }
+
+      const searchResults = await db
+        .select()
+        .from(recipes)
+        .where(and(...conditions));
+
+      return c.json(searchResults);
     }
-
-    if (categoryId) {
-      conditions.push(eq(recipes.categoryId, categoryId));
-    }
-
-    const searchResults = await db
-      .select()
-      .from(recipes)
-      .where(and(...conditions));
-
-    return c.json(searchResults);
   } catch (error) {
     console.error("Error searching recipes:", error);
     return c.json({ error: "Failed to search recipes" }, 500);
@@ -74,7 +184,7 @@ app.get("/search", async (c) => {
 });
 
 // GET a specific recipe
-app.get("/:id", async (c) => {
+app.get("/recipes/:id", async (c) => {
   const id = c.req.param("id");
 
   try {
@@ -84,7 +194,31 @@ app.get("/:id", async (c) => {
       return c.json({ error: "Recipe not found" }, 404);
     }
 
-    return c.json(recipe);
+    // Get average rating
+    const [ratingInfo] = await db
+      .select({
+        average: sql`ROUND(AVG(rating)::numeric, 1)`,
+        count: sql`COUNT(*)::int`,
+      })
+      .from(ratings)
+      .where(eq(ratings.recipeId, id));
+
+    // Get category information
+    const [category] = recipe.categoryId
+      ? await db
+          .select()
+          .from(categories)
+          .where(eq(categories.id, recipe.categoryId))
+      : [null];
+
+    return c.json({
+      ...recipe,
+      category,
+      rating: {
+        average: ratingInfo?.average || 0,
+        count: ratingInfo?.count,
+      },
+    });
   } catch (error) {
     console.error("Error fetching recipe:", error);
     return c.json({ error: "Failed to fetch recipe" }, 500);
